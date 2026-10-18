@@ -8,7 +8,7 @@ def get_schema_metadata():
         cursor.execute("""
             SELECT table_name, column_name, data_type 
             FROM DATAMIND_DB.INFORMATION_SCHEMA.COLUMNS 
-            WHERE table_schema = 'RAW'
+            WHERE table_schema = 'DATA'
         """)
         return cursor.fetchall()
     finally:
