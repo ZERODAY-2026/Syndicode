@@ -5,11 +5,16 @@ def get_schema_metadata():
     conn = snowflake.connector.connect(**SF_CONFIG)
     cursor = conn.cursor()
     try:
-        cursor.execute("""
+        # Dynamically get the schema from the .env file
+        schema_name = SF_CONFIG["schema"]
+        db_name = SF_CONFIG["database"]
+        
+        query = f"""
             SELECT table_name, column_name, data_type 
-            FROM DATAMIND_DB.INFORMATION_SCHEMA.COLUMNS 
-            WHERE table_schema = 'RAW'
-        """)
+            FROM {db_name}.INFORMATION_SCHEMA.COLUMNS 
+            WHERE table_schema = '{schema_name}'
+        """
+        cursor.execute(query)
         return cursor.fetchall()
     finally:
         cursor.close()

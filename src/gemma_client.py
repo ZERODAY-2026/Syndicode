@@ -1,9 +1,18 @@
 import ollama
 import json
+import os
+from dotenv import load_dotenv
 
-MODEL = "gemma2:2b"
+load_dotenv()
+
+# Connect to Sayan's laptop using the IP from the .env file
+OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+client = ollama.Client(host=OLLAMA_URL)
+MODEL = "gemma3n:e4b"
 
 def generate_plan(question: str, schema_metadata: list) -> dict:
+    """Step 1: Gemma generates plan.json"""
+    
     schema_str = "\n".join([f"- {t}.{c} ({d})" for t, c, d in schema_metadata])
     
     prompt = f"""You are an AI Data Planner. 
@@ -18,8 +27,11 @@ Create a JSON plan with these exact keys:
 
 Output ONLY valid JSON. Do not include markdown formatting like ```json."""
 
-    response = ollama.chat(model=MODEL, messages=[{'role': 'user', 'content': prompt}])
+    # Use client.chat instead of ollama.chat to connect to Sayan's laptop
+    response = client.chat(model=MODEL, messages=[{'role': 'user', 'content': prompt}])
     raw_text = response['message']['content'].strip()
+    
+    # Clean up just in case
     raw_text = raw_text.replace('```json', '').replace('```', '').strip()
     
     try:
@@ -28,6 +40,7 @@ Output ONLY valid JSON. Do not include markdown formatting like ```json."""
         return {"status": "error", "reason": "Gemma failed to generate valid JSON."}
 
 def explain_results(question: str, evidence: dict) -> str:
+    """Step 4: Gemma explains the verified answer"""
     prompt = f"""You are a helpful Data Analyst.
 User Question: "{question}"
 Executed SQL: {evidence.get('query_id', 'N/A')}
@@ -36,5 +49,6 @@ Data Rows: {evidence['rows'][:10]} (showing max 10)
 
 Write a short, plain-English summary answering the user's question using ONLY the data provided."""
 
-    response = ollama.chat(model=MODEL, messages=[{'role': 'user', 'content': prompt}])
+    # Use client.chat here too!
+    response = client.chat(model=MODEL, messages=[{'role': 'user', 'content': prompt}])
     return response['message']['content'].strip()
