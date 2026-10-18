@@ -3,6 +3,7 @@ import sqlite3
 
 import sqlglot
 from sqlglot import exp
+from src.charts import validate_chart_spec
 from src.snowflake_client import get_schema_metadata, execute_sql
 from src.gemma_client import PLAN_OUTPUT_PATH, generate_plan, explain_results
 
@@ -134,18 +135,18 @@ def _snowflake_error_message(error: Exception) -> str:
     return "Snowflake could not execute the generated SQL."
 
 
-def _ground_aggregate_summary(sql: str, evidence: dict, summary: str) -> str:
+def _aggregate_summary(sql: str, evidence: dict) -> str | None:
     rows = evidence.get("rows", [])
     columns = evidence.get("columns", [])
     if len(rows) != 1 or len(columns) != 1:
-        return summary
+        return None
 
     try:
         query = sqlglot.parse_one(sql, read="snowflake")
     except Exception:
-        return summary
+        return None
     if not any(isinstance(node, exp.AggFunc) for node in query.walk()):
-        return summary
+        return None
 
     value = rows[0][0]
     if isinstance(value, int) and not isinstance(value, bool):
@@ -155,6 +156,31 @@ def _ground_aggregate_summary(sql: str, evidence: dict, summary: str) -> str:
     if any(isinstance(node, exp.Count) for node in query.walk()):
         return f"The count is {rendered_value}."
     return f"The query result is {rendered_value}."
+
+
+def _result_explanation(
+    question: str,
+    sql: str,
+    evidence: dict,
+) -> tuple[str, dict | None, str | None]:
+    response = explain_results(question, sql, evidence)
+    if not isinstance(response, dict):
+        return str(response), None, "The response did not include a chart."
+
+    summary = response.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        summary = "The query returned results, but no summary was generated."
+
+    chart, validation_reason = validate_chart_spec(
+        response.get("chart"), evidence
+    )
+    if chart is not None:
+        return summary.strip(), chart, None
+
+    reason = validation_reason or response.get("chart_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = "No relevant chart was suggested for these results."
+    return summary.strip(), None, reason.strip()
 
 
 def run_agent(question: str, dataset: str | None = None):
@@ -211,18 +237,28 @@ def run_agent(question: str, dataset: str | None = None):
         return {
             "answer": "The database returned no records for this query.",
             "evidence": evidence,
+            "chart": None,
+            "chart_reason": "There are no rows to visualize.",
             "plan": plan,
             "plan_file": str(PLAN_OUTPUT_PATH),
             "sql_query": safe_sql,
         }
 
     print("\n[4. Gemma Explaining...]")
-    explanation = explain_results(question, safe_sql, evidence)
-    explanation = _ground_aggregate_summary(safe_sql, evidence, explanation)
+    explanation = _aggregate_summary(safe_sql, evidence)
+    if explanation is None:
+        explanation, chart, chart_reason = _result_explanation(
+            question, safe_sql, evidence
+        )
+    else:
+        chart = None
+        chart_reason = "A chart is not useful for a single aggregate value."
     
     return {
         "answer": explanation,
         "evidence": evidence,
+        "chart": chart,
+        "chart_reason": chart_reason,
         "plan": plan,
         "plan_file": str(PLAN_OUTPUT_PATH),
         "sql_query": safe_sql,
@@ -299,15 +335,24 @@ def run_uploaded_agent(
             "sql_query": safe_sql,
         }
 
-    explanation = (
-        explain_results(question, safe_sql, evidence)
-        if evidence["rows"]
-        else "The uploaded file query completed but returned no rows."
-    )
-    explanation = _ground_aggregate_summary(safe_sql, evidence, explanation)
+    if not evidence["rows"]:
+        explanation = "The uploaded file query completed but returned no rows."
+        chart = None
+        chart_reason = "There are no rows to visualize."
+    else:
+        explanation = _aggregate_summary(safe_sql, evidence)
+        if explanation is None:
+            explanation, chart, chart_reason = _result_explanation(
+                question, safe_sql, evidence
+            )
+        else:
+            chart = None
+            chart_reason = "A chart is not useful for a single aggregate value."
     return {
         "answer": explanation,
         "evidence": evidence,
+        "chart": chart,
+        "chart_reason": chart_reason,
         "plan": plan,
         "plan_file": str(PLAN_OUTPUT_PATH),
         "sql_query": safe_sql,

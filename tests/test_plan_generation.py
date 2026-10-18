@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 from src import agent, gemma_client, snowflake_client
+from src.charts import chart_dataframe, validate_chart_spec
 
 
 SCHEMA = [
@@ -226,7 +227,7 @@ class PlanGenerationTests(unittest.TestCase):
 
         def explain(question, sql, returned_evidence):
             call_order.append(("explain", question, sql, returned_evidence))
-            return "The user is Ada."
+            return {"summary": "The user is Ada.", "chart": None}
 
         with (
             patch.object(agent, "get_schema_metadata", return_value=SCHEMA),
@@ -248,6 +249,7 @@ class PlanGenerationTests(unittest.TestCase):
         self.assertEqual(result["answer"], "The user is Ada.")
         self.assertEqual(result["evidence"], evidence)
         self.assertEqual(result["sql_query"], executed_sql)
+        self.assertIsNone(result["chart"])
 
     def test_explainer_prompt_includes_sql_and_returned_data(self):
         evidence = {
@@ -255,7 +257,17 @@ class PlanGenerationTests(unittest.TestCase):
             "columns": ["NAME"],
             "rows": [("Ada",)],
         }
-        response = {"message": {"content": "Ada is the result."}}
+        response = {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "summary": "Ada is the result.",
+                        "chart": None,
+                        "chart_reason": "Only one row was returned.",
+                    }
+                )
+            }
+        }
         with patch.object(gemma_client.client, "chat", return_value=response) as chat:
             answer = gemma_client.explain_results(
                 "Find user names", "SELECT NAME FROM USERS LIMIT 100;", evidence
@@ -265,9 +277,108 @@ class PlanGenerationTests(unittest.TestCase):
         self.assertIn("Executed SQL: SELECT NAME FROM USERS LIMIT 100;", prompt)
         self.assertIn("Data Columns: ['NAME']", prompt)
         self.assertIn("Data Rows: [('Ada',)]", prompt)
-        self.assertIn("state its exact value", prompt)
+        self.assertIn("exact value in the summary", prompt)
         self.assertIn("do not mention LIMIT", prompt)
-        self.assertEqual(answer, "Ada is the result.")
+        self.assertIn('"chart_reason"', prompt)
+        self.assertEqual(answer["summary"], "Ada is the result.")
+        self.assertIsNone(answer["chart"])
+
+    def test_valid_chart_spec_is_checked_against_evidence(self):
+        evidence = {
+            "columns": ["REGION", "REVENUE"],
+            "rows": [("East", 12.5), ("West", 18.0)],
+        }
+        chart, reason = validate_chart_spec(
+            {
+                "type": "bar",
+                "x": "REGION",
+                "y": "REVENUE",
+                "title": "Revenue by region",
+            },
+            evidence,
+        )
+
+        self.assertIsNone(reason)
+        self.assertEqual(chart["type"], "bar")
+        self.assertEqual(
+            chart_dataframe(chart, evidence).to_dict("records"),
+            [
+                {"REGION": "East", "REVENUE": 12.5},
+                {"REGION": "West", "REVENUE": 18.0},
+            ],
+        )
+
+    def test_snowflake_results_can_return_a_validated_chart(self):
+        plan = model_plan("USERS")
+        plan["sql_query"] = "SELECT NAME, USER_ID FROM USERS"
+        evidence = {
+            "query_id": "query-chart",
+            "columns": ["NAME", "USER_ID"],
+            "rows": [("Ada", 10), ("Grace", 20)],
+        }
+        with (
+            patch.object(agent, "get_schema_metadata", return_value=SCHEMA),
+            patch.object(agent, "generate_plan", return_value=plan),
+            patch.object(agent, "execute_sql", return_value=evidence),
+            patch.object(
+                agent,
+                "explain_results",
+                return_value={
+                    "summary": "Two user IDs were returned.",
+                    "chart": {
+                        "type": "scatter",
+                        "x": "NAME",
+                        "y": "USER_ID",
+                        "title": "User IDs",
+                    },
+                },
+            ),
+            patch.object(agent, "PLAN_OUTPUT_PATH", self.plan_path),
+        ):
+            result = agent.run_agent("Show user IDs")
+
+        self.assertEqual(result["chart"]["type"], "scatter")
+        self.assertIsNone(result["chart_reason"])
+
+    def test_invalid_or_malformed_chart_is_dropped_but_summary_is_kept(self):
+        evidence = {
+            "columns": ["REGION", "REVENUE"],
+            "rows": [("East", 12.5), ("West", 18.0)],
+        }
+        for chart_spec in (
+            {"type": "bar", "x": "REGION", "y": "MISSING", "title": "Revenue"},
+            {"type": ["bar"], "x": "REGION", "y": "REVENUE", "title": "Revenue"},
+        ):
+            with self.subTest(chart=chart_spec):
+                with patch.object(
+                    agent,
+                    "explain_results",
+                    return_value={
+                        "summary": "Revenue differs by region.",
+                        "chart": chart_spec,
+                    },
+                ):
+                    summary, chart, reason = agent._result_explanation(
+                        "Compare revenue", "SELECT REGION, REVENUE FROM SALES", evidence
+                    )
+
+                self.assertEqual(summary, "Revenue differs by region.")
+                self.assertIsNone(chart)
+                self.assertTrue(reason)
+
+    def test_malformed_explanation_response_falls_back_to_plain_text(self):
+        with patch.object(gemma_client.client, "chat", return_value={
+            "message": {"content": "Could not format as JSON."}
+        }):
+            response = gemma_client.explain_results(
+                "Summarize", "SELECT NAME FROM USERS", {
+                    "columns": ["NAME"], "rows": [("Ada",)]
+                }
+            )
+
+        self.assertEqual(response["summary"], "Could not format as JSON.")
+        self.assertIsNone(response["chart"])
+        self.assertTrue(response["chart_reason"])
 
     def test_empty_result_returns_evidence_without_explaining(self):
         evidence = {"query_id": "query-empty", "columns": ["NAME"], "rows": []}
@@ -308,6 +419,41 @@ class PlanGenerationTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["rows"], [(3,)])
         self.assertEqual(result["sql_query"], "SELECT COUNT(*) AS USER_COUNT FROM USERS LIMIT 100;")
 
+    def test_uploaded_csv_results_can_return_a_validated_chart(self):
+        plan = model_plan("SALES")
+        plan.update(
+            source="uploaded_file",
+            information_to_gather=["revenue by region"],
+            sql_query="SELECT REGION, REVENUE FROM SALES",
+        )
+        chart = {
+            "type": "line",
+            "x": "REGION",
+            "y": "REVENUE",
+            "title": "Revenue by region",
+        }
+        datasets = {
+            "SALES": pd.DataFrame(
+                {"REGION": ["East", "West"], "REVENUE": [12.5, 18.0]}
+            )
+        }
+        with (
+            patch.object(agent, "generate_plan", return_value=plan),
+            patch.object(
+                agent,
+                "explain_results",
+                return_value={"summary": "Revenue increased.", "chart": chart},
+            ),
+            patch.object(agent, "PLAN_OUTPUT_PATH", self.plan_path),
+        ):
+            result = agent.run_uploaded_agent(
+                "Show revenue by region", datasets, "SALES"
+            )
+
+        self.assertEqual(result["chart"], chart)
+        self.assertIsNone(result["chart_reason"])
+        self.assertEqual(len(result["evidence"]["rows"]), 2)
+
     def test_snowflake_aggregate_error_is_explained_actionably(self):
         class SnowflakeAggregateError(Exception):
             errno = 979
@@ -317,12 +463,33 @@ class PlanGenerationTests(unittest.TestCase):
         self.assertIn("GROUP BY", message)
 
     def test_scalar_count_summary_uses_exact_database_value(self):
-        summary = agent._ground_aggregate_summary(
+        summary = agent._aggregate_summary(
             "SELECT COUNT(*) FROM USERS LIMIT 100",
             {"columns": ["COUNT(*)"], "rows": [(150000,)]},
-            "There are approximately 150,000 users; the limit may truncate the count.",
         )
         self.assertEqual(summary, "The count is 150,000.")
+
+    def test_scalar_aggregate_skips_second_gemma_call(self):
+        plan = model_plan()
+        plan["sql_query"] = "SELECT COUNT(*) FROM USERS"
+        evidence = {
+            "query_id": "query-count",
+            "columns": ["COUNT(*)"],
+            "rows": [(150000,)],
+        }
+        with (
+            patch.object(agent, "get_schema_metadata", return_value=SCHEMA),
+            patch.object(agent, "generate_plan", return_value=plan),
+            patch.object(agent, "execute_sql", return_value=evidence),
+            patch.object(agent, "explain_results") as explain,
+            patch.object(agent, "PLAN_OUTPUT_PATH", self.plan_path),
+        ):
+            result = agent.run_agent("How many users are there?")
+
+        explain.assert_not_called()
+        self.assertEqual(result["answer"], "The count is 150,000.")
+        self.assertIsNone(result["chart"])
+        self.assertIn("single aggregate", result["chart_reason"])
 
 
 class SchemaMetadataTests(unittest.TestCase):

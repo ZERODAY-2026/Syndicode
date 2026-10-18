@@ -137,6 +137,8 @@ Output ONLY valid JSON. Do not include markdown formatting like ```json."""
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             format="json",
+            keep_alive="10m",
+            options={"num_predict": 192},
         )
     except Exception as error:
         raise RuntimeError(f"Gemma request failed: {error}") from error
@@ -196,18 +198,50 @@ Output ONLY valid JSON. Do not include markdown formatting like ```json."""
     return plan
 
 
-def explain_results(question: str, sql_query: str, evidence: dict) -> str:
+def explain_results(question: str, sql_query: str, evidence: dict) -> dict:
     prompt = f"""You are a helpful Data Analyst.
 User Question: "{question}"
 Executed SQL: {sql_query}
 Query ID: {evidence.get('query_id', 'N/A')}
 Data Columns: {evidence['columns']}
-Data Rows: {evidence['rows'][:10]} (showing max 10)
+Data Rows: {evidence['rows'][:20]} (showing max 20)
 
-Write a short, plain-English summary answering the user's question using ONLY the data provided.
-Treat the returned rows as the exact final query result. For a one-row aggregate,
-state its exact value and do not mention LIMIT. LIMIT restricts returned rows; it does
-not restrict rows included in an aggregate."""
+Using ONLY the executed SQL and returned data, respond as a JSON object with exactly
+these keys:
+- "summary": A short, plain-English answer grounded in the returned data.
+- "chart": null if a chart would not help, otherwise an object with exactly
+  "type" ("bar", "line", or "scatter"), "x" (an exact result column name),
+  "y" (an exact result column name containing numeric values), and "title"
+  (a short chart title).
+- "chart_reason": A brief reason when chart is null; otherwise null.
 
-    response = client.chat(model=MODEL, messages=[{"role": "user", "content": prompt}])
-    return response["message"]["content"].strip()
+Suggest a chart only when at least two returned rows support a meaningful visual.
+Never invent columns or values. Do not include HTML, code, or markdown. Treat the
+returned rows as the exact final query result. For a one-row aggregate, state its
+exact value in the summary, do not mention LIMIT, and do not suggest a chart.
+LIMIT restricts returned rows; it does not restrict rows included in an aggregate.
+Output only valid JSON."""
+
+    response = client.chat(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        format="json",
+        keep_alive="10m",
+        options={"num_predict": 192},
+    )
+    content = response["message"]["content"].strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return {
+            "summary": content,
+            "chart": None,
+            "chart_reason": "The response did not contain a valid chart specification.",
+        }
+    if not isinstance(parsed, dict):
+        return {
+            "summary": "",
+            "chart": None,
+            "chart_reason": "The response did not contain a valid chart specification.",
+        }
+    return parsed

@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from src.agent import run_agent, run_uploaded_agent
+from src.charts import chart_dataframe
 
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,19 @@ if result:
 
     evidence = result.get("evidence")
     if evidence is not None:
+        chart = result.get("chart")
+        if chart:
+            st.text(chart["title"])
+            chart_data = chart_dataframe(chart, evidence)
+            if chart["type"] == "bar":
+                st.bar_chart(chart_data, x=chart["x"], y=chart["y"])
+            elif chart["type"] == "line":
+                st.line_chart(chart_data, x=chart["x"], y=chart["y"])
+            elif chart["type"] == "scatter":
+                st.scatter_chart(chart_data, x=chart["x"], y=chart["y"])
+        elif result.get("chart_reason"):
+            st.text(f"Chart not shown: {result['chart_reason']}")
+
         st.subheader("Query results")
         query_id = evidence.get("query_id", "N/A")
         query_label = (

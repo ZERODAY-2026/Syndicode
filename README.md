@@ -2,7 +2,8 @@
 
 DataMind is a Streamlit data assistant that turns natural-language questions into
 SQL, checks the generated query against the available schema, runs it, and
-summarizes the returned data. It supports Snowflake tables and CSV files
+summarizes the returned data. When results support a useful visual, it can also
+show a bar, line, or scatter chart. It supports Snowflake tables and CSV files
 uploaded for the current app session.
 
 ## Requirements
