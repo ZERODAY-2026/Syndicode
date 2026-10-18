@@ -66,9 +66,4 @@ if __name__ == "__main__":
     print("\n" + "="*50)
     print("FINAL OUTPUT TO USER:")
     print(result["answer"])
-    print("="*50)
-
-
-
-
-    
+    print("="*50)    
