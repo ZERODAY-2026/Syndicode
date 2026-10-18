@@ -172,17 +172,6 @@ st.markdown(
     "Review the verified SQL, results, and any chart suggested by the returned data."
 )
 
-sample_columns = st.columns(3)
-sample_prompts = (
-    "Count the records",
-    "Show the first 10 rows",
-    "Compare totals by category",
-)
-for column, prompt in zip(sample_columns, sample_prompts):
-    with column:
-        if st.button(prompt, use_container_width=True, type="secondary"):
-            st.session_state["question_input"] = prompt
-
 with st.form("question_form", clear_on_submit=False, border=True):
     question = st.text_area(
         "What would you like to know?",
