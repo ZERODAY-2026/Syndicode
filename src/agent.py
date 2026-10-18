@@ -75,6 +75,14 @@ def run_agent(question: str, file_path: str = None):
     }
 
 # --- THIS IS THE PART YOU WERE MISSING ---
+
+def run_uploaded_agent(question: str, file_path: str = None):
+    """
+    This is a bridge function to satisfy the Streamlit UI's import.
+    It just passes the arguments to our main run_agent function.
+    """
+    return run_agent(question, file_path)
+
 if __name__ == "__main__":
     print("=== TEST: REAL SNOWFLAKE DATASET ===")
     
